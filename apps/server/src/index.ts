@@ -1,80 +1,63 @@
-import express, {
-  type Express,
-  type Request,
-  type Response,
-  type NextFunction,
-} from "express";
-import cors from "cors";
-import helmet from "helmet";
-import morgan from "morgan";
-import dotenv from "dotenv";
+import { createApp } from "./app.js";
+import { env } from "./config/env.js";
+import { logger } from "./config/logger.js";
+import { testDatabaseConnection } from "./config/database.js";
 
-// Load environment variables
-dotenv.config();
+const startServer = async (): Promise<void> => {
+  try {
+    // Test database connection
+    const dbConnected = await testDatabaseConnection();
+    if (!dbConnected) {
+      logger.error("Failed to connect to database. Server will not start.");
+      process.exit(1);
+    }
 
-const app: Express = express();
-const PORT = process.env.PORT || 4000;
-const NODE_ENV = process.env.NODE_ENV || "development";
+    // Create Express app
+    const app = createApp();
 
-// Security middleware
-app.use(helmet());
+    // Start server
+    const server = app.listen(env.PORT, () => {
+      logger.info(
+        `🚀 Server running on port ${env.PORT} in ${env.NODE_ENV} mode`
+      );
+      logger.info(
+        `📡 Health check available at http://localhost:${env.PORT}/health`
+      );
+    });
 
-// CORS configuration
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
-    credentials: true,
-  })
-);
+    // Graceful shutdown
+    const gracefulShutdown = (signal: string) => {
+      logger.info(`${signal} received. Starting graceful shutdown...`);
+      server.close(() => {
+        logger.info("HTTP server closed");
+        process.exit(0);
+      });
 
-// Logging middleware
-if (NODE_ENV === "development") {
-  app.use(morgan("dev"));
-} else {
-  app.use(morgan("combined"));
-}
+      // Force close after 10 seconds
+      setTimeout(() => {
+        logger.error("Forced shutdown after timeout");
+        process.exit(1);
+      }, 10000);
+    };
 
-// Body parsing middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
-// Health check endpoint
-app.get("/health", (_req: Request, res: Response) => {
-  res.status(200).json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    environment: NODE_ENV,
-  });
-});
+    // Handle unhandled promise rejections
+    process.on("unhandledRejection", (reason, promise) => {
+      logger.error("Unhandled Rejection", { reason, promise });
+      gracefulShutdown("unhandledRejection");
+    });
 
-// API routes
-app.get("/api", (_req: Request, res: Response) => {
-  res.json({
-    message: "Highbid API",
-    version: "1.0.0",
-  });
-});
+    // Handle uncaught exceptions
+    process.on("uncaughtException", (error) => {
+      logger.error("Uncaught Exception", { error });
+      gracefulShutdown("uncaughtException");
+    });
+  } catch (error) {
+    logger.error("Failed to start server", { error });
+    process.exit(1);
+  }
+};
 
-// 404 handler
-app.use((_req: Request, res: Response) => {
-  res.status(404).json({
-    error: "Not Found",
-    message: "The requested resource was not found",
-  });
-});
-
-// Error handling middleware
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("Error:", err);
-
-  const statusCode = res.statusCode !== 200 ? res.statusCode : 500;
-  res.status(statusCode).json({
-    error: NODE_ENV === "production" ? "Internal Server Error" : err.message,
-    ...(NODE_ENV === "development" && { stack: err.stack }),
-  });
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} in ${NODE_ENV} mode`);
-});
+startServer();
